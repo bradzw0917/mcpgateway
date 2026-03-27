@@ -4,7 +4,10 @@
       "WebFetch(domain:www.alibabacloud.com)",
       "WebSearch",
       "Bash(npm install:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(git push:*)"
     ]
   }
 }
