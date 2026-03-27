@@ -1,0 +1,1 @@
+export { default as mcpProxyRouter, proxyMCPRequest } from './mcp-proxy.js';
