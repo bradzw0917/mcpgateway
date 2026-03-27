@@ -6,13 +6,18 @@ let config: GatewayConfig | null = null;
 
 /**
  * 加载配置文件
+ *
+ * 配置优先级 (从高到低):
+ * 1. 环境变量
+ * 2. config.json 文件
+ * 3. 默认值
  */
 export function loadConfig(configPath?: string): GatewayConfig {
   if (config) {
     return config;
   }
 
-  // 尝试从多个位置加载配置
+  // 尝试从多个位置加载配置文件
   const configPaths = configPath
     ? [configPath]
     : [
@@ -39,7 +44,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
   // 合并默认配置
   config = mergeConfig(defaultConfig, loadedConfig);
 
-  // 从环境变量覆盖
+  // 从环境变量覆盖 (最高优先级)
   applyEnvOverrides(config);
 
   // 验证配置
@@ -68,6 +73,7 @@ function mergeConfig(
   return {
     ...defaults,
     ...overrides,
+    gatewayBaseUrl: overrides.gatewayBaseUrl || defaults.gatewayBaseUrl,
     oauth: {
       ...defaults.oauth!,
       ...overrides.oauth,
@@ -83,9 +89,15 @@ function mergeConfig(
  * 从环境变量覆盖配置
  */
 function applyEnvOverrides(cfg: GatewayConfig): void {
+  // Gateway 配置
   if (process.env.MCP_GATEWAY_PORT) {
     cfg.port = parseInt(process.env.MCP_GATEWAY_PORT, 10);
   }
+  if (process.env.GATEWAY_BASE_URL) {
+    cfg.gatewayBaseUrl = process.env.GATEWAY_BASE_URL;
+  }
+
+  // OAuth 配置
   if (process.env.OAUTH_CLIENT_ID) {
     cfg.oauth.clientId = process.env.OAUTH_CLIENT_ID;
   }
@@ -101,6 +113,8 @@ function applyEnvOverrides(cfg: GatewayConfig): void {
   if (process.env.OAUTH_CALLBACK_PORT) {
     cfg.oauth.callbackPort = parseInt(process.env.OAUTH_CALLBACK_PORT, 10);
   }
+
+  // MCP Server 配置
   if (process.env.MCP_SERVER_BASE_URL) {
     cfg.mcpServer.baseUrl = process.env.MCP_SERVER_BASE_URL;
   }
@@ -122,9 +136,9 @@ function validateConfig(cfg: GatewayConfig): void {
 /**
  * 动态添加 MCP 服务
  */
-export function addService(alias: string, path: string): void {
+export function addService(alias: string, servicePath: string): void {
   const cfg = getConfig();
-  cfg.mcpServer.services[alias] = path;
+  cfg.mcpServer.services[alias] = servicePath;
 }
 
 /**
@@ -132,4 +146,11 @@ export function addService(alias: string, path: string): void {
  */
 export function getServices(): Record<string, string> {
   return getConfig().mcpServer.services;
+}
+
+/**
+ * 获取 Gateway 的基础 URL
+ */
+export function getGatewayBaseUrl(): string | undefined {
+  return getConfig().gatewayBaseUrl;
 }

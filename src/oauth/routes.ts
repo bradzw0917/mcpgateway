@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { getConfig } from '../config/index.js';
+import { getConfig, getGatewayBaseUrl } from '../config/index.js';
 import { userManager, UserTokens } from '../user/index.js';
 import { generateCodeVerifier, generateCodeChallenge, generateState } from './pkce.js';
 import { exchangeCodeForToken, refreshAccessToken, storeUserTokens, getValidAccessToken } from './token-manager.js';
@@ -9,15 +9,15 @@ const router = Router();
 
 /**
  * 获取 Gateway 的基础 URL
- * 优先级: GATEWAY_BASE_URL 环境变量 > 请求的 Host 头 > localhost
+ * 优先级: config.gatewayBaseUrl > 请求的 Host 头 > localhost
  */
-function getGatewayBaseUrl(req: Request): string {
+function getGatewayBaseUrlFromRequest(req: Request): string {
   const config = getConfig();
   const port = config.oauth.callbackPort || config.port;
 
-  // 优先使用环境变量配置的地址
-  if (process.env.GATEWAY_BASE_URL) {
-    return process.env.GATEWAY_BASE_URL;
+  // 优先使用配置的地址 (来自 config.json 或 GATEWAY_BASE_URL 环境变量)
+  if (config.gatewayBaseUrl) {
+    return config.gatewayBaseUrl;
   }
 
   // 使用请求的 Host 头
@@ -38,7 +38,7 @@ function getGatewayBaseUrl(req: Request): string {
  * 构建阿里云回调 URL
  */
 function buildAlicloudCallbackUrl(req: Request): string {
-  const baseUrl = getGatewayBaseUrl(req);
+  const baseUrl = getGatewayBaseUrlFromRequest(req);
   return `${baseUrl}/oauth/callback`;
 }
 
@@ -48,7 +48,7 @@ function buildAlicloudCallbackUrl(req: Request): string {
  */
 router.get('/.well-known/oauth-authorization-server', (req: Request, res: Response): void => {
   const config = getConfig();
-  const baseUrl = getGatewayBaseUrl(req);
+  const baseUrl = getGatewayBaseUrlFromRequest(req);
 
   // 返回 Gateway 的 OAuth 端点
   res.json({

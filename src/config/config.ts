@@ -5,6 +5,9 @@ export interface GatewayConfig {
   /** Gateway 监听端口 */
   port: number;
 
+  /** Gateway 的公网访问地址 (用于 OAuth 回调) */
+  gatewayBaseUrl?: string;
+
   /** OAuth 配置 */
   oauth: OAuthConfig;
 
@@ -33,7 +36,7 @@ export interface MCPServerConfig {
   /** MCP Server 基础 URL */
   baseUrl: string;
 
-  /** MCP 服务路径映射 */
+  /** MCP 服务路径映射: alias -> path */
   services: Record<string, string>;
 }
 
@@ -42,6 +45,7 @@ export interface MCPServerConfig {
  */
 export const defaultConfig: Partial<GatewayConfig> = {
   port: 3000,
+  gatewayBaseUrl: undefined,
   oauth: {
     clientId: '',
     authorizationEndpoint: 'https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/authorize',

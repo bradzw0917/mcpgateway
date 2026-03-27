@@ -144,31 +144,26 @@ claude mcp add --transport http aliyun-ecs http://123.45.67.89:3000/ecs/mcp
 
 ## 配置说明
 
-### 环境变量
+配置有三个优先级层级（从高到低）：
 
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `OAUTH_CLIENT_ID` | OAuth 客户端 ID | 必填 |
-| `GATEWAY_BASE_URL` | Gateway 的公网访问地址 | 自动检测 |
-| `MCP_GATEWAY_PORT` | Gateway 监听端口 | 3000 |
-| `OAUTH_AUTHORIZATION_ENDPOINT` | OAuth 授权端点 | `https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/authorize` |
-| `OAUTH_TOKEN_ENDPOINT` | OAuth Token 端点 | `https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/token` |
-| `OAUTH_SCOPE` | OAuth 权限范围 | `/acs/mcp-server` |
-| `MCP_SERVER_BASE_URL` | MCP Server 基础 URL | `https://openapi-mcp-intl.vpc-proxy.aliyuncs.com` |
-| `LOG_LEVEL` | 日志级别 | `info` |
+1. **环境变量** - 最高优先级
+2. **config.json 文件**
+3. **默认值**
 
-### 配置文件
+### 配置文件 (config.json)
 
 ```json
 {
   "port": 3000,
+  "gatewayBaseUrl": "http://YOUR_SERVER_IP:3000",
+
   "oauth": {
     "clientId": "your_client_id",
     "authorizationEndpoint": "https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/authorize",
     "tokenEndpoint": "https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/token",
-    "scope": "/acs/mcp-server",
-    "callbackPort": 3000
+    "scope": "/acs/mcp-server"
   },
+
   "mcpServer": {
     "baseUrl": "https://openapi-mcp-intl.vpc-proxy.aliyuncs.com",
     "services": {
@@ -179,6 +174,32 @@ claude mcp add --transport http aliyun-ecs http://123.45.67.89:3000/ecs/mcp
   }
 }
 ```
+
+### 环境变量
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `OAUTH_CLIENT_ID` | OAuth 客户端 ID | 必填 |
+| `GATEWAY_BASE_URL` | Gateway 的公网访问地址（用于 OAuth 回调） | 自动检测 |
+| `MCP_GATEWAY_PORT` | Gateway 监听端口 | 3000 |
+| `OAUTH_AUTHORIZATION_ENDPOINT` | OAuth 授权端点 | `https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/authorize` |
+| `OAUTH_TOKEN_ENDPOINT` | OAuth Token 端点 | `https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/token` |
+| `OAUTH_SCOPE` | OAuth 权限范围 | `/acs/mcp-server` |
+| `MCP_SERVER_BASE_URL` | MCP Server 基础 URL | `https://openapi-mcp-intl.vpc-proxy.aliyuncs.com` |
+| `LOG_LEVEL` | 日志级别 | `info` |
+
+### 配置项说明
+
+| 配置项 | 说明 | 是否必填 |
+|--------|------|----------|
+| `port` | Gateway 监听端口 | 否，默认 3000 |
+| `gatewayBaseUrl` | Gateway 的公网访问地址，用于生成 OAuth 回调 URL | 远程部署时必填 |
+| `oauth.clientId` | 阿里云 OAuth 应用的 Client ID | **必填** |
+| `oauth.authorizationEndpoint` | 阿里云 OAuth 授权端点 | 否 |
+| `oauth.tokenEndpoint` | 阿里云 OAuth Token 端点 | 否 |
+| `oauth.scope` | OAuth 权限范围 | 否 |
+| `mcpServer.baseUrl` | 阿里云 MCP Server 基础 URL | 否 |
+| `mcpServer.services` | MCP 服务路径映射，key 是别名，value 是路径 | 否 |
 
 ## API 端点
 

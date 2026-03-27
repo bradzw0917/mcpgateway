@@ -1,11 +1,14 @@
 {
   "port": 3000,
+  "gatewayBaseUrl": "http://YOUR_SERVER_IP:3000",
+
   "oauth": {
     "clientId": "YOUR_CLIENT_ID",
     "authorizationEndpoint": "https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/authorize",
     "tokenEndpoint": "https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/token",
     "scope": "/acs/mcp-server"
   },
+
   "mcpServer": {
     "baseUrl": "https://openapi-mcp-intl.vpc-proxy.aliyuncs.com",
     "services": {
