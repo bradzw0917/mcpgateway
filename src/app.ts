@@ -2,6 +2,7 @@ import express, { Express, Request, Response } from 'express';
 import { getConfig, getServices, addService } from './config/index.js';
 import { oauthRoutes } from './oauth/index.js';
 import { mcpProxyRouter } from './mcp-proxy/index.js';
+import { userManager } from './user/index.js';
 import { logger } from './utils/logger.js';
 
 /**
@@ -30,7 +31,7 @@ export function createApp(): Express {
     });
   });
 
-  // OAuth 路由
+  // OAuth 路由 (用于用户通过浏览器完成认证)
   app.use('/oauth', oauthRoutes);
 
   // MCP 代理路由
@@ -66,10 +67,15 @@ export function createApp(): Express {
 
   // 根路由
   app.get('/', (_req: Request, res: Response) => {
+    const defaultUserId = userManager.getDefaultUserId();
+    const isAuthenticated = userManager.isAuthenticated(defaultUserId);
+
     res.json({
       name: 'MCP Gateway',
       version: process.env.npm_package_version || '1.0.0',
       description: 'MCP Gateway for Alibaba Cloud OpenAPI MCP Server',
+      authenticated: isAuthenticated,
+      authenticateUrl: isAuthenticated ? null : '/oauth/authorize',
       endpoints: {
         mcp: '/:service/mcp',
         oauth: {

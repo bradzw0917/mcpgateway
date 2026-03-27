@@ -65,14 +65,35 @@ npm run build
 npm start
 ```
 
-### 4. 在 Claude Code 中配置
+### 4. 完成阿里云 OAuth 认证
+
+**重要**: 在使用 Claude Code 之前，你需要先在 Gateway 完成阿里云 OAuth 认证。
+
+在浏览器中访问：
+```
+http://localhost:3000/oauth/authorize
+```
+
+按照页面提示：
+1. 跳转到阿里云登录页面
+2. 使用你的阿里云账号登录并授权
+3. 授权成功后会自动返回 Gateway
+
+验证认证状态：
+```bash
+curl http://localhost:3000/oauth/status
+```
+
+### 5. 在 Claude Code 中配置
+
+认证完成后，在 Claude Code 中添加 MCP 服务器：
 
 ```bash
-# 添加 MCP 服务器
+# 添加 MCP 服务器（无需 OAuth 认证，Gateway 已处理认证）
 claude mcp add --transport http aliyun-ecs http://localhost:3000/ecs/mcp
 
-# 启动认证
-/mcp
+# 验证连接
+# 在 Claude Code 中执行 /mcp 查看状态
 ```
 
 ## 配置说明
