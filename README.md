@@ -67,25 +67,31 @@ npm start
 
 ### 4. 在 Claude Code 中配置
 
+**重要**: 必须使用 `--client-id` 参数，因为阿里云 OAuth 不支持动态客户端注册。
+
 **本机部署**：
 ```bash
-claude mcp add --transport http aliyun-ecs http://localhost:3000/ecs/mcp
+# --client-id 可以是任意值，Gateway 会使用预配置的 Client ID
+claude mcp add --transport http --client-id mcp-gateway aliyun-ecs http://localhost:3000/ecs/mcp
 ```
 
 **远程部署**（Gateway 在另一台服务器）：
 ```bash
 # 使用服务器 IP
-claude mcp add --transport http aliyun-ecs http://YOUR_SERVER_IP:3000/ecs/mcp
+claude mcp add --transport http --client-id mcp-gateway aliyun-ecs http://YOUR_SERVER_IP:3000/ecs/mcp
 
 # 或使用域名
-claude mcp add --transport http aliyun-ecs https://gateway.yourdomain.com/ecs/mcp
+claude mcp add --transport http --client-id mcp-gateway aliyun-ecs https://gateway.yourdomain.com/ecs/mcp
 ```
 
 ### 5. 完成 OAuth 认证
 
 ```bash
-# 在 Claude Code 中执行 /mcp，会自动打开浏览器跳转到阿里云授权页面
+# 在 Claude Code 中执行 /mcp，选择对应的服务器进行认证
 /mcp
+
+# 选择 "Authenticate"，浏览器会自动打开阿里云授权页面
+# 授权成功后会自动返回
 ```
 
 ## 远程部署配置

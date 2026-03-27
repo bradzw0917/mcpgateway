@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express';
-import { getConfig, getGatewayBaseUrl } from '../config/index.js';
+import { getConfig } from '../config/index.js';
 import { userManager, UserTokens } from '../user/index.js';
 import { generateCodeVerifier, generateCodeChallenge, generateState } from './pkce.js';
-import { exchangeCodeForToken, refreshAccessToken, storeUserTokens, getValidAccessToken } from './token-manager.js';
+import { exchangeCodeForToken, refreshAccessToken, storeUserTokens } from './token-manager.js';
 import { logger } from '../utils/logger.js';
 
 const router = Router();
@@ -11,7 +11,7 @@ const router = Router();
  * 获取 Gateway 的基础 URL
  * 优先级: config.gatewayBaseUrl > 请求的 Host 头 > localhost
  */
-function getGatewayBaseUrlFromRequest(req: Request): string {
+export function getGatewayBaseUrlFromRequest(req: Request): string {
   const config = getConfig();
   const port = config.oauth.callbackPort || config.port;
 
@@ -41,26 +41,6 @@ function buildAlicloudCallbackUrl(req: Request): string {
   const baseUrl = getGatewayBaseUrlFromRequest(req);
   return `${baseUrl}/oauth/callback`;
 }
-
-/**
- * GET /.well-known/oauth-authorization-server - OAuth 元数据发现
- * Claude Code 使用此端点发现 OAuth 配置
- */
-router.get('/.well-known/oauth-authorization-server', (req: Request, res: Response): void => {
-  const config = getConfig();
-  const baseUrl = getGatewayBaseUrlFromRequest(req);
-
-  // 返回 Gateway 的 OAuth 端点
-  res.json({
-    issuer: baseUrl,
-    authorization_endpoint: `${baseUrl}/oauth/authorize`,
-    token_endpoint: `${baseUrl}/oauth/token`,
-    response_types_supported: ['code'],
-    code_challenge_methods_supported: ['S256'],
-    grant_types_supported: ['authorization_code', 'refresh_token'],
-    scopes_supported: [config.oauth.scope],
-  });
-});
 
 /**
  * GET /oauth/authorize - 启动 OAuth 授权流程

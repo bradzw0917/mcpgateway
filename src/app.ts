@@ -1,6 +1,6 @@
 import express, { Express, Request, Response } from 'express';
 import { getConfig, getServices, addService } from './config/index.js';
-import { oauthRoutes } from './oauth/index.js';
+import { oauthRoutes, getGatewayBaseUrlFromRequest } from './oauth/index.js';
 import { mcpProxyRouter } from './mcp-proxy/index.js';
 import { userManager } from './user/index.js';
 import { logger } from './utils/logger.js';
@@ -18,8 +18,25 @@ export function createApp(): Express {
 
   // 请求日志
   app.use((req: Request, res: Response, next) => {
-    logger.debug(`${req.method} ${req.path}`);
+    logger.info(`${req.method} ${req.path}`);
     next();
+  });
+
+  // OAuth 元数据发现端点 - 必须在根路径
+  // Claude Code 会访问 /.well-known/oauth-authorization-server
+  app.get('/.well-known/oauth-authorization-server', (req: Request, res: Response) => {
+    const config = getConfig();
+    const baseUrl = getGatewayBaseUrlFromRequest(req);
+
+    res.json({
+      issuer: baseUrl,
+      authorization_endpoint: `${baseUrl}/oauth/authorize`,
+      token_endpoint: `${baseUrl}/oauth/token`,
+      response_types_supported: ['code'],
+      code_challenge_methods_supported: ['S256'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
+      scopes_supported: [config.oauth.scope],
+    });
   });
 
   // 健康检查
