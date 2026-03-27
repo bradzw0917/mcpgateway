@@ -7,30 +7,32 @@ import { logger } from '../utils/logger.js';
 
 const router = Router();
 
+// 存储待验证的授权码
+const pendingCodes: Map<string, {
+  userId: string;
+  createdAt: number;
+  tokens?: UserTokens;
+}> = new Map();
+
 /**
  * 获取 Gateway 的基础 URL
- * 优先级: config.gatewayBaseUrl > 请求的 Host 头 > localhost
  */
 export function getGatewayBaseUrlFromRequest(req: Request): string {
   const config = getConfig();
   const port = config.oauth.callbackPort || config.port;
 
-  // 优先使用配置的地址 (来自 config.json 或 GATEWAY_BASE_URL 环境变量)
   if (config.gatewayBaseUrl) {
     return config.gatewayBaseUrl;
   }
 
-  // 使用请求的 Host 头
   const host = req.get('host');
   if (host) {
-    // 如果 Host 包含端口，直接使用
     if (host.includes(':')) {
       return `${req.protocol}://${host}`;
     }
     return `${req.protocol}://${host}:${port}`;
   }
 
-  // 默认使用 localhost
   return `http://localhost:${port}`;
 }
 
@@ -43,45 +45,48 @@ function buildAlicloudCallbackUrl(req: Request): string {
 }
 
 /**
+ * 生成设备码
+ */
+function generateDeviceCode(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let code = '';
+  for (let i = 0; i < 8; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
+/**
  * GET /oauth/authorize - 启动 OAuth 授权流程
- * Claude Code 会调用此端点，传入 redirect_uri, state, code_challenge 等参数
  */
 router.get('/authorize', async (req: Request, res: Response): Promise<void> => {
   try {
     const config = getConfig();
-
-    // 获取 Claude Code 传入的参数
     const clientState = req.query.state as string;
-    const clientCodeChallenge = req.query.code_challenge as string;
     const clientRedirectUri = req.query.redirect_uri as string;
 
-    logger.info('Received OAuth authorize request', {
-      clientState,
-      clientCodeChallenge: clientCodeChallenge ? 'present' : 'missing',
-      clientRedirectUri,
-    });
+    logger.info('Received OAuth authorize request', { clientState, clientRedirectUri });
 
-    // 验证必要参数
-    if (!clientState || !clientRedirectUri) {
+    if (!clientState) {
       res.status(400).json({
         error: 'invalid_request',
-        error_description: 'Missing required parameters: state, redirect_uri',
+        error_description: 'Missing required parameter: state',
       });
       return;
     }
 
-    // 生成 Gateway 自己的 PKCE 参数 (用于阿里云)
+    // 生成 PKCE 参数
     const gatewayCodeVerifier = generateCodeVerifier();
     const gatewayCodeChallenge = generateCodeChallenge(gatewayCodeVerifier);
     const gatewayState = generateState();
 
-    // 创建会话，存储两套 OAuth 参数
+    // 创建会话
     const userId = userManager.getDefaultUserId();
     userManager.createSession(
       userId,
       clientState,
-      clientCodeChallenge || '',
-      clientRedirectUri,
+      '',
+      clientRedirectUri || '',
       gatewayState,
       gatewayCodeVerifier
     );
@@ -98,7 +103,6 @@ router.get('/authorize', async (req: Request, res: Response): Promise<void> => {
     authUrl.searchParams.set('code_challenge_method', 'S256');
 
     logger.info(`Redirecting to Alicloud authorization for user: ${userId}`);
-    logger.debug(`Authorization URL: ${authUrl.toString()}`);
 
     // 重定向到阿里云授权页面
     res.redirect(authUrl.toString());
@@ -115,23 +119,21 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
   try {
     const { code, state, error, error_description } = req.query;
 
-    // 处理授权错误
     if (error) {
       logger.error(`OAuth error: ${error}`, error_description);
       res.status(400).send(`
         <html>
           <head><title>Authorization Failed</title></head>
-          <body>
-            <h1>Authorization Failed</h1>
+          <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1 style="color: #ef4444;">Authorization Failed</h1>
             <p>Error: ${error}</p>
-            <p>Description: ${error_description || 'N/A'}</p>
+            <p>${error_description || ''}</p>
           </body>
         </html>
       `);
       return;
     }
 
-    // 验证 gateway state
     if (!state || typeof state !== 'string') {
       res.status(400).send('<h1>Error: Missing state parameter</h1>');
       return;
@@ -143,13 +145,12 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // 验证授权码
     if (!code || typeof code !== 'string') {
       res.status(400).send('<h1>Error: Missing authorization code</h1>');
       return;
     }
 
-    // 用授权码换取 Token (使用 Gateway 的 code_verifier)
+    // 用授权码换取 Token
     const alicloudCallbackUrl = buildAlicloudCallbackUrl(req);
     const tokenResponse = await exchangeCodeForToken(code, session.gatewayCodeVerifier, alicloudCallbackUrl);
 
@@ -158,24 +159,30 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
 
     logger.info(`OAuth successful for user: ${session.id}`);
 
-    // 重定向回 Claude Code 的 redirect_uri，带上原始的 state
-    const redirectUrl = new URL(session.clientRedirectUri);
-    redirectUrl.searchParams.set('code', 'success');  // 用一个假的授权码
-    redirectUrl.searchParams.set('state', session.clientState);
-
-    logger.info(`Redirecting back to client: ${redirectUrl.toString()}`);
-
-    // 显示成功页面，然后自动跳转
+    // 显示成功页面
     res.send(`
       <html>
         <head>
           <title>Authorization Successful</title>
-          <meta http-equiv="refresh" content="2;url=${redirectUrl.toString()}">
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; text-align: center; padding: 50px; background: #f9fafb; }
+            .container { background: white; border-radius: 12px; padding: 40px; max-width: 400px; margin: 0 auto; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+            .success { color: #22c55e; font-size: 64px; margin-bottom: 20px; }
+            h1 { color: #1f2937; margin: 0 0 10px; }
+            p { color: #6b7280; margin: 0; }
+            .instruction { margin-top: 30px; padding: 20px; background: #f3f4f6; border-radius: 8px; }
+          </style>
         </head>
         <body>
-          <h1>Authorization Successful!</h1>
-          <p>You have been authenticated successfully.</p>
-          <p>Redirecting back to Claude Code...</p>
+          <div class="container">
+            <div class="success">✓</div>
+            <h1>Authorization Successful!</h1>
+            <p>You have been authenticated successfully.</p>
+            <div class="instruction">
+              <p><strong>Please return to Claude Code</strong></p>
+              <p>Click "Reconnect" or run <code>/mcp</code> to continue</p>
+            </div>
+          </div>
         </body>
       </html>
     `);
@@ -184,8 +191,8 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
     res.status(500).send(`
       <html>
         <head><title>Error</title></head>
-        <body>
-          <h1>Authentication Failed</h1>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+          <h1 style="color: #ef4444;">Authentication Failed</h1>
           <p>Error: ${(err as Error).message}</p>
         </body>
       </html>
@@ -198,25 +205,24 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
  */
 router.post('/token', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { grant_type, code, code_verifier, redirect_uri, refresh_token } = req.body;
+    const { grant_type, code, refresh_token } = req.body;
 
     logger.info('Token request received', { grant_type });
 
     if (grant_type === 'authorization_code') {
-      // Claude Code 用授权码换取 Token
-      // 由于我们已经在 callback 中获取了 token，这里直接返回存储的 token
       const userId = userManager.getDefaultUserId();
       const tokens = userManager.getTokens(userId);
 
       if (!tokens) {
         res.status(400).json({
-          error: 'invalid_grant',
-          error_description: 'No tokens found. Please complete OAuth flow first.',
+          error: 'authorization_pending',
+          error_description: 'Authorization not completed. Please complete OAuth in browser first.',
         });
         return;
       }
 
-      // 返回存储的 token
+      logger.info(`Returning tokens for user: ${userId}`);
+
       res.json({
         access_token: tokens.accessToken,
         refresh_token: tokens.refreshToken,
@@ -227,7 +233,6 @@ router.post('/token', async (req: Request, res: Response): Promise<void> => {
     }
 
     if (grant_type === 'refresh_token' && refresh_token) {
-      // Token 刷新
       const config = getConfig();
       const tokenResponse = await fetch(config.oauth.tokenEndpoint, {
         method: 'POST',
