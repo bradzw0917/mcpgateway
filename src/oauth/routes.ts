@@ -8,13 +8,38 @@ import { logger } from '../utils/logger.js';
 const router = Router();
 
 /**
- * 构建阿里云回调 URL
+ * 获取 Gateway 的基础 URL
+ * 优先级: GATEWAY_BASE_URL 环境变量 > 请求的 Host 头 > localhost
  */
-function buildAlicloudCallbackUrl(): string {
+function getGatewayBaseUrl(req: Request): string {
   const config = getConfig();
   const port = config.oauth.callbackPort || config.port;
-  const host = process.env.OAUTH_CALLBACK_HOST || 'localhost';
-  return `http://${host}:${port}/oauth/callback`;
+
+  // 优先使用环境变量配置的地址
+  if (process.env.GATEWAY_BASE_URL) {
+    return process.env.GATEWAY_BASE_URL;
+  }
+
+  // 使用请求的 Host 头
+  const host = req.get('host');
+  if (host) {
+    // 如果 Host 包含端口，直接使用
+    if (host.includes(':')) {
+      return `${req.protocol}://${host}`;
+    }
+    return `${req.protocol}://${host}:${port}`;
+  }
+
+  // 默认使用 localhost
+  return `http://localhost:${port}`;
+}
+
+/**
+ * 构建阿里云回调 URL
+ */
+function buildAlicloudCallbackUrl(req: Request): string {
+  const baseUrl = getGatewayBaseUrl(req);
+  return `${baseUrl}/oauth/callback`;
 }
 
 /**
@@ -23,9 +48,7 @@ function buildAlicloudCallbackUrl(): string {
  */
 router.get('/.well-known/oauth-authorization-server', (req: Request, res: Response): void => {
   const config = getConfig();
-  const port = config.oauth.callbackPort || config.port;
-  const host = process.env.OAUTH_CALLBACK_HOST || req.get('host')?.split(':')[0] || 'localhost';
-  const baseUrl = `http://${host}:${port}`;
+  const baseUrl = getGatewayBaseUrl(req);
 
   // 返回 Gateway 的 OAuth 端点
   res.json({
@@ -51,7 +74,6 @@ router.get('/authorize', async (req: Request, res: Response): Promise<void> => {
     const clientState = req.query.state as string;
     const clientCodeChallenge = req.query.code_challenge as string;
     const clientRedirectUri = req.query.redirect_uri as string;
-    const responseMode = req.query.response_mode as string;
 
     logger.info('Received OAuth authorize request', {
       clientState,
@@ -85,7 +107,7 @@ router.get('/authorize', async (req: Request, res: Response): Promise<void> => {
     );
 
     // 构建阿里云授权 URL
-    const alicloudCallbackUrl = buildAlicloudCallbackUrl();
+    const alicloudCallbackUrl = buildAlicloudCallbackUrl(req);
     const authUrl = new URL(config.oauth.authorizationEndpoint);
     authUrl.searchParams.set('client_id', config.oauth.clientId);
     authUrl.searchParams.set('redirect_uri', alicloudCallbackUrl);
@@ -148,7 +170,7 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
     }
 
     // 用授权码换取 Token (使用 Gateway 的 code_verifier)
-    const alicloudCallbackUrl = buildAlicloudCallbackUrl();
+    const alicloudCallbackUrl = buildAlicloudCallbackUrl(req);
     const tokenResponse = await exchangeCodeForToken(code, session.gatewayCodeVerifier, alicloudCallbackUrl);
 
     // 存储 Token

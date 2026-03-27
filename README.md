@@ -67,14 +67,80 @@ npm start
 
 ### 4. 在 Claude Code 中配置
 
+**本机部署**：
 ```bash
-# 添加 MCP 服务器
 claude mcp add --transport http aliyun-ecs http://localhost:3000/ecs/mcp
+```
 
-# Claude Code 会自动检测需要 OAuth 认证
-# 执行 /mcp 后会自动打开浏览器跳转到阿里云授权页面
+**远程部署**（Gateway 在另一台服务器）：
+```bash
+# 使用服务器 IP
+claude mcp add --transport http aliyun-ecs http://YOUR_SERVER_IP:3000/ecs/mcp
+
+# 或使用域名
+claude mcp add --transport http aliyun-ecs https://gateway.yourdomain.com/ecs/mcp
+```
+
+### 5. 完成 OAuth 认证
+
+```bash
+# 在 Claude Code 中执行 /mcp，会自动打开浏览器跳转到阿里云授权页面
 /mcp
 ```
+
+## 远程部署配置
+
+当 Claude Code 和 Gateway 不在同一台机器上时，需要进行额外配置：
+
+### 1. 配置 Gateway 的公网地址
+
+设置 `GATEWAY_BASE_URL` 环境变量：
+
+```bash
+# 使用 IP
+export GATEWAY_BASE_URL=http://YOUR_SERVER_IP:3000
+
+# 或使用域名
+export GATEWAY_BASE_URL=https://gateway.yourdomain.com
+```
+
+### 2. 配置阿里云 OAuth 回调地址
+
+在阿里云 RAM 控制台的 OAuth 应用配置中，添加回调地址：
+
+```
+http://YOUR_SERVER_IP:3000/oauth/callback
+```
+
+或使用域名：
+
+```
+https://gateway.yourdomain.com/oauth/callback
+```
+
+### 3. 开放防火墙端口
+
+确保服务器的 3000 端口（或你配置的端口）对外开放。
+
+### 4. 配置示例
+
+**服务器端**：
+```bash
+# 设置环境变量
+export OAUTH_CLIENT_ID=your_client_id
+export GATEWAY_BASE_URL=http://123.45.67.89:3000
+
+# 启动服务
+npm run build && npm start
+```
+
+**客户端 (Claude Code)**：
+```bash
+claude mcp add --transport http aliyun-ecs http://123.45.67.89:3000/ecs/mcp
+```
+
+**阿里云 OAuth 配置**：
+- 回调地址: `http://123.45.67.89:3000/oauth/callback`
 
 ## 配置说明
 
@@ -83,6 +149,7 @@ claude mcp add --transport http aliyun-ecs http://localhost:3000/ecs/mcp
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `OAUTH_CLIENT_ID` | OAuth 客户端 ID | 必填 |
+| `GATEWAY_BASE_URL` | Gateway 的公网访问地址 | 自动检测 |
 | `MCP_GATEWAY_PORT` | Gateway 监听端口 | 3000 |
 | `OAUTH_AUTHORIZATION_ENDPOINT` | OAuth 授权端点 | `https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/authorize` |
 | `OAUTH_TOKEN_ENDPOINT` | OAuth Token 端点 | `https://oauth-intl.vpc-proxy.aliyuncs.com/oauth2/token` |
@@ -122,8 +189,10 @@ claude mcp add --transport http aliyun-ecs http://localhost:3000/ecs/mcp
 
 ### OAuth
 
+- `GET /.well-known/oauth-authorization-server` - OAuth 元数据发现
 - `GET /oauth/authorize` - 启动 OAuth 授权流程
 - `GET /oauth/callback` - OAuth 回调端点
+- `POST /oauth/token` - Token 端点
 - `GET /oauth/status` - 查看认证状态
 - `POST /oauth/logout` - 登出
 
@@ -147,11 +216,13 @@ curl -H "X-User-ID: user-b" http://localhost:3000/ecs/mcp
 
 ## OAuth 流程
 
-1. 用户访问 `/oauth/authorize` 启动授权
-2. Gateway 生成 PKCE 参数并重定向到阿里云授权页面
-3. 用户登录并授权
-4. 阿里云回调到 `/oauth/callback`
-5. Gateway 用授权码换取 Token 并存储
+1. Claude Code 检测到需要 OAuth 认证
+2. 打开浏览器访问 `/oauth/authorize`
+3. Gateway 重定向到阿里云授权页面
+4. 用户登录并授权
+5. 阿里云回调到 `/oauth/callback`
+6. Gateway 用授权码换取 Token 并存储
+7. 重定向回 Claude Code 完成认证
 
 ## License
 
