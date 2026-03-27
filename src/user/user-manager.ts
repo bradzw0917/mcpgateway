@@ -11,12 +11,27 @@ export interface UserTokens {
 }
 
 /**
+ * OAuth 授权请求信息 (来自 Claude Code)
+ */
+export interface OAuthRequest {
+  state: string;  // Claude Code 的 state
+  codeChallenge: string;  // Claude Code 的 code_challenge
+  redirectUri: string;  // Claude Code 的回调地址
+  createdAt: Date;
+}
+
+/**
  * 用户会话信息
  */
 export interface UserSession {
   id: string;
-  state: string;  // OAuth state 参数
-  codeVerifier: string;  // PKCE code_verifier
+  // Claude Code 的 OAuth 参数
+  clientState: string;
+  clientCodeChallenge: string;
+  clientRedirectUri: string;
+  // Gateway 的 OAuth 参数 (用于阿里云)
+  gatewayState: string;
+  gatewayCodeVerifier: string;
   tokens?: UserTokens;
   createdAt: Date;
   updatedAt: Date;
@@ -27,32 +42,55 @@ export interface UserSession {
  */
 class UserManager {
   private sessions: Map<string, UserSession> = new Map();
-  private stateToUser: Map<string, string> = new Map();
+  private gatewayStateToSession: Map<string, string> = new Map();  // gatewayState -> sessionId
+  private clientStateToSession: Map<string, string> = new Map();  // clientState -> sessionId
 
   /**
    * 创建新用户会话
    */
-  createSession(userId: string, state: string, codeVerifier: string): UserSession {
+  createSession(
+    userId: string,
+    clientState: string,
+    clientCodeChallenge: string,
+    clientRedirectUri: string,
+    gatewayState: string,
+    gatewayCodeVerifier: string
+  ): UserSession {
     const session: UserSession = {
       id: userId,
-      state,
-      codeVerifier,
+      clientState,
+      clientCodeChallenge,
+      clientRedirectUri,
+      gatewayState,
+      gatewayCodeVerifier,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
 
     this.sessions.set(userId, session);
-    this.stateToUser.set(state, userId);
+    this.gatewayStateToSession.set(gatewayState, userId);
+    this.clientStateToSession.set(clientState, userId);
 
     logger.info(`Created session for user: ${userId}`);
     return session;
   }
 
   /**
-   * 根据 state 获取用户 ID
+   * 根据 Gateway state 获取会话
    */
-  getUserIdByState(state: string): string | undefined {
-    return this.stateToUser.get(state);
+  getSessionByGatewayState(gatewayState: string): UserSession | undefined {
+    const userId = this.gatewayStateToSession.get(gatewayState);
+    if (!userId) return undefined;
+    return this.sessions.get(userId);
+  }
+
+  /**
+   * 根据 Client state 获取会话
+   */
+  getSessionByClientState(clientState: string): UserSession | undefined {
+    const userId = this.clientStateToSession.get(clientState);
+    if (!userId) return undefined;
+    return this.sessions.get(userId);
   }
 
   /**
@@ -105,7 +143,8 @@ class UserManager {
     const session = this.sessions.get(userId);
     if (session) {
       this.sessions.delete(userId);
-      this.stateToUser.delete(session.state);
+      this.gatewayStateToSession.delete(session.gatewayState);
+      this.clientStateToSession.delete(session.clientState);
       logger.info(`Deleted session for user: ${userId}`);
       return true;
     }

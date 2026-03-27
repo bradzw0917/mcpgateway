@@ -1,16 +1,16 @@
 import { Router, Request, Response } from 'express';
 import { getConfig } from '../config/index.js';
-import { userManager } from '../user/index.js';
+import { userManager, UserTokens } from '../user/index.js';
 import { generateCodeVerifier, generateCodeChallenge, generateState } from './pkce.js';
-import { exchangeCodeForToken, storeUserTokens, getValidAccessToken } from './token-manager.js';
+import { exchangeCodeForToken, refreshAccessToken, storeUserTokens, getValidAccessToken } from './token-manager.js';
 import { logger } from '../utils/logger.js';
 
 const router = Router();
 
 /**
- * 构建回调 URL
+ * 构建阿里云回调 URL
  */
-function buildCallbackUrl(): string {
+function buildAlicloudCallbackUrl(): string {
   const config = getConfig();
   const port = config.oauth.callbackPort || config.port;
   const host = process.env.OAUTH_CALLBACK_HOST || 'localhost';
@@ -18,44 +18,96 @@ function buildCallbackUrl(): string {
 }
 
 /**
+ * GET /.well-known/oauth-authorization-server - OAuth 元数据发现
+ * Claude Code 使用此端点发现 OAuth 配置
+ */
+router.get('/.well-known/oauth-authorization-server', (req: Request, res: Response): void => {
+  const config = getConfig();
+  const port = config.oauth.callbackPort || config.port;
+  const host = process.env.OAUTH_CALLBACK_HOST || req.get('host')?.split(':')[0] || 'localhost';
+  const baseUrl = `http://${host}:${port}`;
+
+  // 返回 Gateway 的 OAuth 端点
+  res.json({
+    issuer: baseUrl,
+    authorization_endpoint: `${baseUrl}/oauth/authorize`,
+    token_endpoint: `${baseUrl}/oauth/token`,
+    response_types_supported: ['code'],
+    code_challenge_methods_supported: ['S256'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    scopes_supported: [config.oauth.scope],
+  });
+});
+
+/**
  * GET /oauth/authorize - 启动 OAuth 授权流程
+ * Claude Code 会调用此端点，传入 redirect_uri, state, code_challenge 等参数
  */
 router.get('/authorize', async (req: Request, res: Response): Promise<void> => {
   try {
     const config = getConfig();
-    const userId = (req.query.user_id as string) || userManager.getDefaultUserId();
-    const callbackUrl = buildCallbackUrl();
 
-    // 生成 PKCE 参数
-    const codeVerifier = generateCodeVerifier();
-    const codeChallenge = generateCodeChallenge(codeVerifier);
-    const state = generateState();
+    // 获取 Claude Code 传入的参数
+    const clientState = req.query.state as string;
+    const clientCodeChallenge = req.query.code_challenge as string;
+    const clientRedirectUri = req.query.redirect_uri as string;
+    const responseMode = req.query.response_mode as string;
 
-    // 创建用户会话
-    userManager.createSession(userId, state, codeVerifier);
+    logger.info('Received OAuth authorize request', {
+      clientState,
+      clientCodeChallenge: clientCodeChallenge ? 'present' : 'missing',
+      clientRedirectUri,
+    });
 
-    // 构建授权 URL
+    // 验证必要参数
+    if (!clientState || !clientRedirectUri) {
+      res.status(400).json({
+        error: 'invalid_request',
+        error_description: 'Missing required parameters: state, redirect_uri',
+      });
+      return;
+    }
+
+    // 生成 Gateway 自己的 PKCE 参数 (用于阿里云)
+    const gatewayCodeVerifier = generateCodeVerifier();
+    const gatewayCodeChallenge = generateCodeChallenge(gatewayCodeVerifier);
+    const gatewayState = generateState();
+
+    // 创建会话，存储两套 OAuth 参数
+    const userId = userManager.getDefaultUserId();
+    userManager.createSession(
+      userId,
+      clientState,
+      clientCodeChallenge || '',
+      clientRedirectUri,
+      gatewayState,
+      gatewayCodeVerifier
+    );
+
+    // 构建阿里云授权 URL
+    const alicloudCallbackUrl = buildAlicloudCallbackUrl();
     const authUrl = new URL(config.oauth.authorizationEndpoint);
     authUrl.searchParams.set('client_id', config.oauth.clientId);
-    authUrl.searchParams.set('redirect_uri', callbackUrl);
+    authUrl.searchParams.set('redirect_uri', alicloudCallbackUrl);
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('scope', config.oauth.scope);
-    authUrl.searchParams.set('state', state);
-    authUrl.searchParams.set('code_challenge', codeChallenge);
+    authUrl.searchParams.set('state', gatewayState);
+    authUrl.searchParams.set('code_challenge', gatewayCodeChallenge);
     authUrl.searchParams.set('code_challenge_method', 'S256');
 
-    logger.info(`Redirecting to authorization endpoint for user: ${userId}`);
+    logger.info(`Redirecting to Alicloud authorization for user: ${userId}`);
     logger.debug(`Authorization URL: ${authUrl.toString()}`);
 
+    // 重定向到阿里云授权页面
     res.redirect(authUrl.toString());
   } catch (err) {
     logger.error('Authorization error:', err);
-    res.status(500).json({ error: 'Authorization failed', message: (err as Error).message });
+    res.status(500).json({ error: 'server_error', error_description: (err as Error).message });
   }
 });
 
 /**
- * GET /oauth/callback - OAuth 回调端点
+ * GET /oauth/callback - 阿里云 OAuth 回调端点
  */
 router.get('/callback', async (req: Request, res: Response): Promise<void> => {
   try {
@@ -64,65 +116,142 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
     // 处理授权错误
     if (error) {
       logger.error(`OAuth error: ${error}`, error_description);
-      res.status(400).json({
-        error: 'OAuth error',
-        code: error,
-        description: error_description,
-      });
+      res.status(400).send(`
+        <html>
+          <head><title>Authorization Failed</title></head>
+          <body>
+            <h1>Authorization Failed</h1>
+            <p>Error: ${error}</p>
+            <p>Description: ${error_description || 'N/A'}</p>
+          </body>
+        </html>
+      `);
       return;
     }
 
-    // 验证 state
+    // 验证 gateway state
     if (!state || typeof state !== 'string') {
-      res.status(400).json({ error: 'Missing state parameter' });
+      res.status(400).send('<h1>Error: Missing state parameter</h1>');
       return;
     }
 
-    const userId = userManager.getUserIdByState(state);
-    if (!userId) {
-      res.status(400).json({ error: 'Invalid state parameter' });
-      return;
-    }
-
-    const session = userManager.getSession(userId);
+    const session = userManager.getSessionByGatewayState(state);
     if (!session) {
-      res.status(400).json({ error: 'Session not found' });
+      res.status(400).send('<h1>Error: Invalid or expired session</h1>');
       return;
     }
 
     // 验证授权码
     if (!code || typeof code !== 'string') {
-      res.status(400).json({ error: 'Missing authorization code' });
+      res.status(400).send('<h1>Error: Missing authorization code</h1>');
       return;
     }
 
-    // 用授权码换取 Token
-    const callbackUrl = buildCallbackUrl();
-    const tokenResponse = await exchangeCodeForToken(code, session.codeVerifier, callbackUrl);
+    // 用授权码换取 Token (使用 Gateway 的 code_verifier)
+    const alicloudCallbackUrl = buildAlicloudCallbackUrl();
+    const tokenResponse = await exchangeCodeForToken(code, session.gatewayCodeVerifier, alicloudCallbackUrl);
 
     // 存储 Token
-    storeUserTokens(userId, tokenResponse);
+    storeUserTokens(session.id, tokenResponse);
 
-    logger.info(`OAuth successful for user: ${userId}`);
+    logger.info(`OAuth successful for user: ${session.id}`);
 
-    // 返回成功页面
+    // 重定向回 Claude Code 的 redirect_uri，带上原始的 state
+    const redirectUrl = new URL(session.clientRedirectUri);
+    redirectUrl.searchParams.set('code', 'success');  // 用一个假的授权码
+    redirectUrl.searchParams.set('state', session.clientState);
+
+    logger.info(`Redirecting back to client: ${redirectUrl.toString()}`);
+
+    // 显示成功页面，然后自动跳转
     res.send(`
       <html>
-        <head><title>Authorization Successful</title></head>
+        <head>
+          <title>Authorization Successful</title>
+          <meta http-equiv="refresh" content="2;url=${redirectUrl.toString()}">
+        </head>
         <body>
-          <h1>Authorization Successful</h1>
+          <h1>Authorization Successful!</h1>
           <p>You have been authenticated successfully.</p>
-          <p>You can close this window and return to Claude Code.</p>
-          <script>setTimeout(() => window.close(), 3000);</script>
+          <p>Redirecting back to Claude Code...</p>
         </body>
       </html>
     `);
   } catch (err) {
     logger.error('Callback error:', err);
-    res.status(500).json({
-      error: 'Authentication failed',
-      message: (err as Error).message,
-    });
+    res.status(500).send(`
+      <html>
+        <head><title>Error</title></head>
+        <body>
+          <h1>Authentication Failed</h1>
+          <p>Error: ${(err as Error).message}</p>
+        </body>
+      </html>
+    `);
+  }
+});
+
+/**
+ * POST /oauth/token - Token 端点
+ */
+router.post('/token', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { grant_type, code, code_verifier, redirect_uri, refresh_token } = req.body;
+
+    logger.info('Token request received', { grant_type });
+
+    if (grant_type === 'authorization_code') {
+      // Claude Code 用授权码换取 Token
+      // 由于我们已经在 callback 中获取了 token，这里直接返回存储的 token
+      const userId = userManager.getDefaultUserId();
+      const tokens = userManager.getTokens(userId);
+
+      if (!tokens) {
+        res.status(400).json({
+          error: 'invalid_grant',
+          error_description: 'No tokens found. Please complete OAuth flow first.',
+        });
+        return;
+      }
+
+      // 返回存储的 token
+      res.json({
+        access_token: tokens.accessToken,
+        refresh_token: tokens.refreshToken,
+        expires_in: Math.max(0, Math.floor((tokens.expiresAt - Date.now()) / 1000)),
+        token_type: tokens.tokenType,
+      });
+      return;
+    }
+
+    if (grant_type === 'refresh_token' && refresh_token) {
+      // Token 刷新
+      const config = getConfig();
+      const tokenResponse = await fetch(config.oauth.tokenEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token,
+          client_id: config.oauth.clientId,
+        }).toString(),
+      });
+
+      if (!tokenResponse.ok) {
+        const errorText = await tokenResponse.text();
+        res.status(tokenResponse.status).json({ error: 'invalid_grant', error_description: errorText });
+        return;
+      }
+
+      const data = await tokenResponse.json();
+      res.json(data);
+      return;
+    }
+
+    res.status(400).json({ error: 'unsupported_grant_type' });
+  } catch (err) {
+    logger.error('Token error:', err);
+    res.status(500).json({ error: 'server_error', error_description: (err as Error).message });
   }
 });
 
@@ -159,27 +288,6 @@ router.post('/logout', (req: Request, res: Response): void => {
     res.json({ success: true, message: 'Logged out successfully' });
   } else {
     res.status(404).json({ error: 'User not found' });
-  }
-});
-
-/**
- * GET /oauth/token - 获取 Access Token (供 MCP 代理使用)
- */
-router.get('/token', async (req: Request, res: Response): Promise<void> => {
-  const userId = (req.query.user_id as string) || req.headers['x-user-id'] as string || userManager.getDefaultUserId();
-
-  try {
-    const accessToken = await getValidAccessToken(userId);
-
-    if (!accessToken) {
-      res.status(401).json({ error: 'Not authenticated', userId });
-      return;
-    }
-
-    res.json({ accessToken, userId });
-  } catch (err) {
-    logger.error('Get token error:', err);
-    res.status(500).json({ error: 'Failed to get token', message: (err as Error).message });
   }
 });
 
