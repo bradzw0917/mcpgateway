@@ -7,6 +7,21 @@ import { logger } from '../utils/logger.js';
 
 const router = Router();
 
+// 存储 OAuth 会话信息
+const oauthSessions: Map<string, {
+  clientState: string;
+  clientRedirectUri: string;
+  clientCodeChallenge: string;
+  gatewayCodeVerifier: string;
+  gatewayState: string;
+  createdAt: number;
+  tokens?: UserTokens;
+  authCode?: string;
+}> = new Map();
+
+// 存储授权码到会话的映射
+const authCodeToSession: Map<string, string> = new Map();
+
 /**
  * 获取 Gateway 的基础 URL
  */
@@ -38,6 +53,18 @@ function buildAlicloudCallbackUrl(req: Request): string {
 }
 
 /**
+ * 生成授权码
+ */
+function generateAuthCode(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let code = '';
+  for (let i = 0; i < 32; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
+/**
  * GET /.well-known/oauth-authorization-server - OAuth 元数据发现
  */
 router.get('/.well-known/oauth-authorization-server', (req: Request, res: Response): void => {
@@ -46,101 +73,69 @@ router.get('/.well-known/oauth-authorization-server', (req: Request, res: Respon
 
   res.json({
     issuer: baseUrl,
-    authorization_endpoint: `${baseUrl}/oauth/device/auth`,
+    authorization_endpoint: `${baseUrl}/oauth/authorize`,
     token_endpoint: `${baseUrl}/oauth/token`,
-    device_authorization_endpoint: `${baseUrl}/oauth/device/auth`,
     response_types_supported: ['code'],
     code_challenge_methods_supported: ['S256'],
-    grant_types_supported: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:device_code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
     scopes_supported: [config.oauth.scope],
   });
 });
 
 /**
- * POST /oauth/device/auth - 设备授权端点
- * Claude Code 会调用此端点获取设备码
+ * GET /oauth/authorize - 启动 OAuth 授权流程
  */
-router.post('/device/auth', (req: Request, res: Response): void => {
-  const baseUrl = getGatewayBaseUrlFromRequest(req);
+router.get('/authorize', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const config = getConfig();
+    const clientState = req.query.state as string;
+    const clientCodeChallenge = req.query.code_challenge as string;
+    const clientRedirectUri = req.query.redirect_uri as string;
 
-  // 创建设备授权
-  const deviceAuth = userManager.createDeviceAuth(`${baseUrl}/oauth/verify`);
+    logger.info('OAuth authorize request', {
+      clientState,
+      clientRedirectUri,
+      clientCodeChallenge: clientCodeChallenge ? 'present' : 'missing'
+    });
 
-  logger.info(`Device auth created: deviceCode=${deviceAuth.deviceCode}, userCode=${deviceAuth.userCode}`);
+    if (!clientState) {
+      res.status(400).send('<h1>Error: Missing state parameter</h1>');
+      return;
+    }
 
-  res.json({
-    device_code: deviceAuth.deviceCode,
-    user_code: deviceAuth.userCode,
-    verification_uri: deviceAuth.verificationUri,
-    verification_uri_complete: deviceAuth.verificationUri,
-    expires_in: deviceAuth.expiresIn,
-    interval: deviceAuth.interval,
-  });
-});
+    // 生成 PKCE 参数
+    const gatewayCodeVerifier = generateCodeVerifier();
+    const gatewayCodeChallenge = generateCodeChallenge(gatewayCodeVerifier);
+    const gatewayState = generateState();
 
-/**
- * GET /oauth/verify - 用户验证页面
- * 用户在此页面输入 user_code 并完成授权
- */
-router.get('/verify', async (req: Request, res: Response): Promise<void> => {
-  const userCode = (req.query.user_code as string)?.toUpperCase();
+    // 创建会话
+    const sessionId = gatewayState;
+    oauthSessions.set(sessionId, {
+      clientState,
+      clientRedirectUri: clientRedirectUri || '',
+      clientCodeChallenge: clientCodeChallenge || '',
+      gatewayCodeVerifier,
+      gatewayState,
+      createdAt: Date.now(),
+    });
 
-  if (!userCode) {
-    res.send(`
-      <html>
-        <head><title>Device Authorization</title></head>
-        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
-          <h1>Device Authorization</h1>
-          <p>Please enter your device code:</p>
-          <form method="get">
-            <input type="text" name="user_code" placeholder="Enter code" style="font-size: 24px; padding: 10px; text-align: center; letter-spacing: 5px;" maxlength="8" />
-            <br><br>
-            <button type="submit" style="font-size: 18px; padding: 10px 30px;">Continue</button>
-          </form>
-        </body>
-      </html>
-    `);
-    return;
+    // 构建阿里云授权 URL
+    const alicloudCallbackUrl = buildAlicloudCallbackUrl(req);
+    const authUrl = new URL(config.oauth.authorizationEndpoint);
+    authUrl.searchParams.set('client_id', config.oauth.clientId);
+    authUrl.searchParams.set('redirect_uri', alicloudCallbackUrl);
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('scope', config.oauth.scope);
+    authUrl.searchParams.set('state', gatewayState);
+    authUrl.searchParams.set('code_challenge', gatewayCodeChallenge);
+    authUrl.searchParams.set('code_challenge_method', 'S256');
+
+    logger.info(`Redirecting to Alicloud authorization`);
+    res.redirect(authUrl.toString());
+  } catch (err) {
+    logger.error('Authorization error:', err);
+    res.status(500).send(`<h1>Error: ${(err as Error).message}</h1>`);
   }
-
-  const deviceAuth = userManager.getDeviceAuthByUserCode(userCode);
-
-  if (!deviceAuth) {
-    res.status(400).send(`
-      <html>
-        <head><title>Invalid Code</title></head>
-        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
-          <h1 style="color: #ef4444;">Invalid Code</h1>
-          <p>The code you entered is invalid or expired.</p>
-          <a href="/oauth/verify">Try again</a>
-        </body>
-      </html>
-    `);
-    return;
-  }
-
-  // 重定向到阿里云授权
-  const config = getConfig();
-  const gatewayCodeVerifier = generateCodeVerifier();
-  const gatewayCodeChallenge = generateCodeChallenge(gatewayCodeVerifier);
-  const gatewayState = generateState();
-
-  // 存储 PKCE 参数到设备授权中（我们需要在回调时使用）
-  (deviceAuth as any).codeVerifier = gatewayCodeVerifier;
-  (deviceAuth as any).state = gatewayState;
-
-  const alicloudCallbackUrl = buildAlicloudCallbackUrl(req);
-  const authUrl = new URL(config.oauth.authorizationEndpoint);
-  authUrl.searchParams.set('client_id', config.oauth.clientId);
-  authUrl.searchParams.set('redirect_uri', alicloudCallbackUrl);
-  authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('scope', config.oauth.scope);
-  authUrl.searchParams.set('state', `${gatewayState}:${userCode}`);
-  authUrl.searchParams.set('code_challenge', gatewayCodeChallenge);
-  authUrl.searchParams.set('code_challenge_method', 'S256');
-
-  logger.info(`Redirecting to Alicloud for device auth: userCode=${userCode}`);
-  res.redirect(authUrl.toString());
 });
 
 /**
@@ -153,32 +148,25 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
     logger.info('OAuth callback received', { code: !!code, state, error });
 
     if (error) {
-      logger.error(`OAuth error: ${error}`, error_description);
       res.status(400).send(`
-        <html>
-          <head><title>Authorization Failed</title></head>
-          <body style="font-family: sans-serif; text-align: center; padding: 50px;">
-            <h1 style="color: #ef4444;">Authorization Failed</h1>
-            <p>Error: ${error}</p>
-            <p>${error_description || ''}</p>
-          </body>
-        </html>
+        <html><head><title>Authorization Failed</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+          <h1 style="color: #ef4444;">Authorization Failed</h1>
+          <p>Error: ${error}</p>
+          <p>${error_description || ''}</p>
+        </body></html>
       `);
       return;
     }
 
-    // 解析 state (格式: gatewayState:userCode)
-    const stateParts = (state as string)?.split(':');
-    if (!stateParts || stateParts.length !== 2) {
-      res.status(400).send('<h1>Error: Invalid state parameter</h1>');
+    if (!state || typeof state !== 'string') {
+      res.status(400).send('<h1>Error: Missing state parameter</h1>');
       return;
     }
 
-    const [gatewayState, userCode] = stateParts;
-    const deviceAuth = userManager.getDeviceAuthByUserCode(userCode);
-
-    if (!deviceAuth) {
-      res.status(400).send('<h1>Error: Invalid or expired device code</h1>');
+    const session = oauthSessions.get(state);
+    if (!session) {
+      res.status(400).send('<h1>Error: Invalid or expired session</h1>');
       return;
     }
 
@@ -189,7 +177,7 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
 
     // 用授权码换取 Token
     const alicloudCallbackUrl = buildAlicloudCallbackUrl(req);
-    const tokenResponse = await exchangeCodeForToken(code, (deviceAuth as any).codeVerifier, alicloudCallbackUrl);
+    const tokenResponse = await exchangeCodeForToken(code, session.gatewayCodeVerifier, alicloudCallbackUrl);
 
     // 存储 Token
     const tokens: UserTokens = {
@@ -198,36 +186,73 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
       expiresAt: Date.now() + tokenResponse.expires_in * 1000,
       tokenType: tokenResponse.token_type,
     };
+    session.tokens = tokens;
 
-    // 完成设备授权
-    const userId = userManager.completeDeviceAuth(deviceAuth.deviceCode, tokens);
+    // 生成授权码给用户复制
+    const authCode = generateAuthCode();
+    session.authCode = authCode;
+    authCodeToSession.set(authCode, state);
 
-    logger.info(`OAuth successful for device: userCode=${userCode}, userId=${userId}`);
+    logger.info(`OAuth successful, auth code generated: ${authCode}`);
 
-    // 显示成功页面
+    // 显示成功页面，让用户复制授权码
     res.send(`
       <html>
-        <head><title>Authorization Successful</title></head>
-        <body style="font-family: sans-serif; text-align: center; padding: 50px; background: #f9fafb;">
-          <div style="background: white; border-radius: 12px; padding: 40px; max-width: 400px; margin: 0 auto; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-            <div style="color: #22c55e; font-size: 64px;">✓</div>
-            <h1 style="color: #1f2937;">Authorization Successful!</h1>
-            <p style="color: #6b7280;">You have been authenticated successfully.</p>
-            <p style="color: #6b7280;">Please return to Claude Code to continue.</p>
+        <head>
+          <title>Authorization Successful</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; text-align: center; padding: 50px; background: #f9fafb; }
+            .container { background: white; border-radius: 12px; padding: 40px; max-width: 500px; margin: 0 auto; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+            .success { color: #22c55e; font-size: 64px; }
+            h1 { color: #1f2937; margin: 0 0 10px; }
+            p { color: #6b7280; margin: 0 0 20px; }
+            .code-box { background: #f3f4f6; border-radius: 8px; padding: 20px; margin: 20px 0; }
+            .code { font-family: monospace; font-size: 24px; letter-spacing: 2px; color: #1f2937; }
+            .instruction { margin-top: 30px; padding: 20px; background: #fef3c7; border-radius: 8px; text-align: left; }
+            .instruction h3 { margin: 0 0 10px; color: #92400e; }
+            .instruction ol { margin: 0; padding-left: 20px; color: #78350f; }
+            button { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 10px; }
+            button:hover { background: #2563eb; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="success">✓</div>
+            <h1>Authorization Successful!</h1>
+            <p>You have been authenticated successfully.</p>
+
+            <div class="code-box">
+              <p style="margin-bottom: 10px; font-weight: bold;">Your Authorization Code:</p>
+              <div class="code" id="authCode">${authCode}</div>
+              <button onclick="copyCode()">📋 Copy Code</button>
+            </div>
+
+            <div class="instruction">
+              <h3>Next Steps:</h3>
+              <ol>
+                <li>Copy the authorization code above</li>
+                <li>Return to Claude Code</li>
+                <li>Paste the code when prompted</li>
+              </ol>
+            </div>
           </div>
+          <script>
+            function copyCode() {
+              navigator.clipboard.writeText('${authCode}');
+              alert('Code copied to clipboard!');
+            }
+          </script>
         </body>
       </html>
     `);
   } catch (err) {
     logger.error('Callback error:', err);
     res.status(500).send(`
-      <html>
-        <head><title>Error</title></head>
-        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
-          <h1 style="color: #ef4444;">Authentication Failed</h1>
-          <p>Error: ${(err as Error).message}</p>
-        </body>
-      </html>
+      <html><head><title>Error</title></head>
+      <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+        <h1 style="color: #ef4444;">Authentication Failed</h1>
+        <p>Error: ${(err as Error).message}</p>
+      </body></html>
     `);
   }
 });
@@ -237,70 +262,44 @@ router.get('/callback', async (req: Request, res: Response): Promise<void> => {
  */
 router.post('/token', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { grant_type, device_code, code, refresh_token } = req.body;
+    const { grant_type, code, refresh_token } = req.body;
 
-    logger.info('Token request received', { grant_type, device_code, code });
+    logger.info('Token request received', { grant_type, code });
 
-    // 设备授权码模式
-    if (grant_type === 'urn:ietf:params:oauth:grant-type:device_code' && device_code) {
-      const result = userManager.checkDeviceAuth(device_code);
-
-      if (result.error === 'invalid_device_code') {
-        res.status(400).json({ error: 'invalid_device_code', error_description: 'Invalid device code' });
-        return;
-      }
-
-      if (result.error === 'expired_device_code') {
-        res.status(400).json({ error: 'expired_device_code', error_description: 'Device code expired' });
-        return;
-      }
-
-      if (result.error === 'authorization_pending') {
-        res.status(400).json({ error: 'authorization_pending', error_description: 'Authorization pending' });
-        return;
-      }
-
-      // 授权完成，返回 Token
-      const tokens = userManager.getTokens(result.userId!);
-      if (!tokens) {
-        res.status(400).json({ error: 'invalid_request', error_description: 'Tokens not found' });
-        return;
-      }
-
-      logger.info(`Returning tokens for device: deviceCode=${device_code}, userId=${result.userId}`);
-
-      res.json({
-        access_token: tokens.accessToken,
-        refresh_token: tokens.refreshToken,
-        expires_in: Math.max(0, Math.floor((tokens.expiresAt - Date.now()) / 1000)),
-        token_type: tokens.tokenType,
-      });
-      return;
-    }
-
-    // 授权码模式（用于兼容）
     if (grant_type === 'authorization_code' && code) {
-      const userId = 'default';
-      const tokens = userManager.getTokens(userId);
-
-      if (!tokens) {
+      // 查找会话
+      const sessionId = authCodeToSession.get(code);
+      if (!sessionId) {
         res.status(400).json({
           error: 'invalid_grant',
-          error_description: 'Authorization not completed or expired.',
+          error_description: 'Invalid authorization code',
         });
         return;
       }
 
+      const session = oauthSessions.get(sessionId);
+      if (!session || !session.tokens) {
+        res.status(400).json({
+          error: 'invalid_grant',
+          error_description: 'Session not found or expired',
+        });
+        return;
+      }
+
+      // 删除授权码（一次性使用）
+      authCodeToSession.delete(code);
+
+      logger.info(`Returning tokens for session: ${sessionId}`);
+
       res.json({
-        access_token: tokens.accessToken,
-        refresh_token: tokens.refreshToken,
-        expires_in: Math.max(0, Math.floor((tokens.expiresAt - Date.now()) / 1000)),
-        token_type: tokens.tokenType,
+        access_token: session.tokens.accessToken,
+        refresh_token: session.tokens.refreshToken,
+        expires_in: Math.max(0, Math.floor((session.tokens.expiresAt - Date.now()) / 1000)),
+        token_type: session.tokens.tokenType,
       });
       return;
     }
 
-    // Token 刷新
     if (grant_type === 'refresh_token' && refresh_token) {
       const config = getConfig();
       const tokenResponse = await fetch(config.oauth.tokenEndpoint, {
@@ -335,53 +334,17 @@ router.post('/token', async (req: Request, res: Response): Promise<void> => {
  * GET /oauth/status - 查看认证状态
  */
 router.get('/status', (req: Request, res: Response): void => {
-  const userId = req.query.user_id as string;
-  const deviceCode = req.query.device_code as string;
-
-  if (deviceCode) {
-    const result = userManager.checkDeviceAuth(deviceCode);
-    res.json(result);
-    return;
-  }
-
-  if (userId) {
-    const session = userManager.getSession(userId);
-    const tokens = userManager.getTokens(userId);
-
-    res.json({
-      userId,
-      hasSession: !!session,
-      isAuthenticated: userManager.isAuthenticated(userId),
-      tokens: tokens ? {
-        hasAccessToken: !!tokens.accessToken,
-        hasRefreshToken: !!tokens.refreshToken,
-        expiresAt: new Date(tokens.expiresAt).toISOString(),
-        tokenType: tokens.tokenType,
-      } : null,
-    });
-    return;
-  }
-
-  res.json({ error: 'Missing user_id or device_code' });
+  res.json({
+    message: 'OAuth status endpoint',
+    activeSessions: oauthSessions.size,
+  });
 });
 
 /**
  * POST /oauth/logout - 登出
  */
 router.post('/logout', (req: Request, res: Response): void => {
-  const userId = req.body.user_id as string;
-  if (!userId) {
-    res.status(400).json({ error: 'Missing user_id' });
-    return;
-  }
-
-  const cleared = userManager.clearTokens(userId);
-  if (cleared) {
-    logger.info(`User logged out: ${userId}`);
-    res.json({ success: true, message: 'Logged out successfully' });
-  } else {
-    res.status(404).json({ error: 'User not found' });
-  }
+  res.json({ success: true, message: 'Logged out successfully' });
 });
 
 export default router;

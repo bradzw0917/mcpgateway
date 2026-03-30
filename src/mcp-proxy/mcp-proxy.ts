@@ -1,8 +1,11 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { getConfig } from '../config/index.js';
-import { userManager } from '../user/index.js';
 import { getValidAccessToken } from '../oauth/token-manager.js';
 import { logger } from '../utils/logger.js';
+
+// 导入 oauthSessions（临时解决方案）
+import { Router as OAuthRouter } from 'express';
+const oauthSessions: Map<string, any> = new Map();
 
 const router = Router();
 
@@ -28,19 +31,9 @@ export async function proxyMCPRequest(
     return;
   }
 
-  // 从请求中获取用户 ID（通过 Authorization header 中的 token）
+  // 从 Authorization header 获取 token
   const authHeader = req.headers.authorization as string;
-  let userId: string | undefined;
-
-  if (authHeader?.startsWith('Bearer ')) {
-    // 从 token 中提取用户 ID（这里简化处理，实际应该验证 token）
-    // 在设备授权模式下，token 就是 access_token，我们需要通过它找到对应的用户
-    const token = authHeader.substring(7);
-    userId = userManager.getUserIdByToken(token);
-  }
-
-  if (!userId) {
-    // 返回需要认证的响应
+  if (!authHeader?.startsWith('Bearer ')) {
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.setHeader('WWW-Authenticate', `Bearer realm="MCP Gateway"`);
     res.status(401).json({
@@ -49,8 +42,7 @@ export async function proxyMCPRequest(
         code: -32600,
         message: 'Authentication required',
         data: {
-          device_authorization_endpoint: `${baseUrl}/oauth/device/auth`,
-          message: 'Please complete device authorization first',
+          authorize_url: `${baseUrl}/oauth/authorize`,
         },
       },
       id: null,
@@ -58,43 +50,14 @@ export async function proxyMCPRequest(
     return;
   }
 
-  // 检查用户是否已认证
-  if (!userManager.isAuthenticated(userId)) {
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    res.status(401).json({
-      jsonrpc: '2.0',
-      error: {
-        code: -32600,
-        message: 'Token expired or invalid',
-        data: {
-          device_authorization_endpoint: `${baseUrl}/oauth/device/auth`,
-        },
-      },
-      id: null,
-    });
-    return;
-  }
+  const accessToken = authHeader.substring(7);
 
   try {
-    // 获取有效的 Access Token
-    const accessToken = await getValidAccessToken(userId);
-    if (!accessToken) {
-      res.status(401).json({
-        jsonrpc: '2.0',
-        error: {
-          code: -32600,
-          message: 'Failed to get valid access token',
-        },
-        id: null,
-      });
-      return;
-    }
-
     // 构建目标 URL
     const targetUrl = `${config.mcpServer.baseUrl}${servicePath}`;
     logger.info(`Proxying request to: ${targetUrl}`);
 
-    // 准备请求头
+    // 准备请求头 - 使用 Claude Code 传来的 access token
     const headers = new Headers();
     headers.set('Authorization', `Bearer ${accessToken}`);
     headers.set('Content-Type', 'application/json');
