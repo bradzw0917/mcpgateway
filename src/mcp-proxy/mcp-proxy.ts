@@ -28,15 +28,49 @@ export async function proxyMCPRequest(
     return;
   }
 
-  // 获取用户 ID
-  const userId = (req.headers['x-user-id'] as string) || userManager.getDefaultUserId();
+  // 从请求中获取用户 ID（通过 Authorization header 中的 token）
+  const authHeader = req.headers.authorization as string;
+  let userId: string | undefined;
+
+  if (authHeader?.startsWith('Bearer ')) {
+    // 从 token 中提取用户 ID（这里简化处理，实际应该验证 token）
+    // 在设备授权模式下，token 就是 access_token，我们需要通过它找到对应的用户
+    const token = authHeader.substring(7);
+    userId = userManager.getUserIdByToken(token);
+  }
+
+  if (!userId) {
+    // 返回需要认证的响应
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    res.setHeader('WWW-Authenticate', `Bearer realm="MCP Gateway"`);
+    res.status(401).json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32600,
+        message: 'Authentication required',
+        data: {
+          device_authorization_endpoint: `${baseUrl}/oauth/device/auth`,
+          message: 'Please complete device authorization first',
+        },
+      },
+      id: null,
+    });
+    return;
+  }
 
   // 检查用户是否已认证
   if (!userManager.isAuthenticated(userId)) {
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
     res.status(401).json({
-      error: 'Not authenticated',
-      message: `User ${userId} is not authenticated. Please complete OAuth flow first.`,
-      authorizeUrl: `/oauth/authorize?user_id=${userId}`,
+      jsonrpc: '2.0',
+      error: {
+        code: -32600,
+        message: 'Token expired or invalid',
+        data: {
+          device_authorization_endpoint: `${baseUrl}/oauth/device/auth`,
+        },
+      },
+      id: null,
     });
     return;
   }
@@ -46,15 +80,19 @@ export async function proxyMCPRequest(
     const accessToken = await getValidAccessToken(userId);
     if (!accessToken) {
       res.status(401).json({
-        error: 'Authentication failed',
-        message: 'Failed to get valid access token',
+        jsonrpc: '2.0',
+        error: {
+          code: -32600,
+          message: 'Failed to get valid access token',
+        },
+        id: null,
       });
       return;
     }
 
     // 构建目标 URL
     const targetUrl = `${config.mcpServer.baseUrl}${servicePath}`;
-    logger.debug(`Proxying request to: ${targetUrl}`);
+    logger.info(`Proxying request to: ${targetUrl}`);
 
     // 准备请求头
     const headers = new Headers();
@@ -86,13 +124,18 @@ export async function proxyMCPRequest(
     const statusCode = response.status;
     const body = await response.text();
 
-    logger.debug(`Response status: ${statusCode}`);
+    logger.info(`Response status: ${statusCode}`);
     res.status(statusCode).send(body);
   } catch (err) {
     logger.error('Proxy error:', err);
     res.status(502).json({
-      error: 'Proxy error',
-      message: (err as Error).message,
+      jsonrpc: '2.0',
+      error: {
+        code: -32603,
+        message: 'Proxy error',
+        data: { details: (err as Error).message },
+      },
+      id: null,
     });
   }
 }

@@ -11,13 +11,19 @@ export interface UserTokens {
 }
 
 /**
- * OAuth 授权请求信息 (来自 Claude Code)
+ * 设备授权信息
  */
-export interface OAuthRequest {
-  state: string;  // Claude Code 的 state
-  codeChallenge: string;  // Claude Code 的 code_challenge
-  redirectUri: string;  // Claude Code 的回调地址
+export interface DeviceAuth {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  expiresIn: number;
+  interval: number;
   createdAt: Date;
+  // 授权完成后存储
+  tokens?: UserTokens;
+  // 关联的用户ID
+  userId?: string;
 }
 
 /**
@@ -25,13 +31,6 @@ export interface OAuthRequest {
  */
 export interface UserSession {
   id: string;
-  // Claude Code 的 OAuth 参数
-  clientState: string;
-  clientCodeChallenge: string;
-  clientRedirectUri: string;
-  // Gateway 的 OAuth 参数 (用于阿里云)
-  gatewayState: string;
-  gatewayCodeVerifier: string;
   tokens?: UserTokens;
   createdAt: Date;
   updatedAt: Date;
@@ -42,55 +41,110 @@ export interface UserSession {
  */
 class UserManager {
   private sessions: Map<string, UserSession> = new Map();
-  private gatewayStateToSession: Map<string, string> = new Map();  // gatewayState -> sessionId
-  private clientStateToSession: Map<string, string> = new Map();  // clientState -> sessionId
+  private deviceAuths: Map<string, DeviceAuth> = new Map();
+  private userCodeToDeviceCode: Map<string, string> = new Map();
+  private tokenToUser: Map<string, string> = new Map();  // accessToken -> userId
 
   /**
-   * 创建新用户会话
+   * 通过 access token 获取用户 ID
    */
-  createSession(
-    userId: string,
-    clientState: string,
-    clientCodeChallenge: string,
-    clientRedirectUri: string,
-    gatewayState: string,
-    gatewayCodeVerifier: string
-  ): UserSession {
+  getUserIdByToken(token: string): string | undefined {
+    return this.tokenToUser.get(token);
+  }
+
+  /**
+   * 创建设备授权请求
+   */
+  createDeviceAuth(verificationUri: string): DeviceAuth {
+    const deviceCode = this.generateCode(32);
+    const userCode = this.generateCode(8).toUpperCase();
+
+    const deviceAuth: DeviceAuth = {
+      deviceCode,
+      userCode,
+      verificationUri: `${verificationUri}?user_code=${userCode}`,
+      expiresIn: 600, // 10分钟过期
+      interval: 5, // 每5秒轮询一次
+      createdAt: new Date(),
+    };
+
+    this.deviceAuths.set(deviceCode, deviceAuth);
+    this.userCodeToDeviceCode.set(userCode, deviceCode);
+
+    logger.info(`Created device auth: userCode=${userCode}`);
+    return deviceAuth;
+  }
+
+  /**
+   * 通过 user_code 获取设备授权信息
+   */
+  getDeviceAuthByUserCode(userCode: string): DeviceAuth | undefined {
+    const deviceCode = this.userCodeToDeviceCode.get(userCode.toUpperCase());
+    if (!deviceCode) return undefined;
+    return this.deviceAuths.get(deviceCode);
+  }
+
+  /**
+   * 通过 device_code 获取设备授权信息
+   */
+  getDeviceAuth(deviceCode: string): DeviceAuth | undefined {
+    return this.deviceAuths.get(deviceCode);
+  }
+
+  /**
+   * 完成设备授权（存储 Token）
+   */
+  completeDeviceAuth(deviceCode: string, tokens: UserTokens): string {
+    const deviceAuth = this.deviceAuths.get(deviceCode);
+    if (!deviceAuth) {
+      throw new Error('Invalid device code');
+    }
+
+    // 创建用户会话
+    const userId = `user_${Date.now()}`;
     const session: UserSession = {
       id: userId,
-      clientState,
-      clientCodeChallenge,
-      clientRedirectUri,
-      gatewayState,
-      gatewayCodeVerifier,
+      tokens,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
 
     this.sessions.set(userId, session);
-    this.gatewayStateToSession.set(gatewayState, userId);
-    this.clientStateToSession.set(clientState, userId);
 
-    logger.info(`Created session for user: ${userId}`);
-    return session;
+    // 存储 token 到用户的映射
+    this.tokenToUser.set(tokens.accessToken, userId);
+
+    // 更新设备授权信息
+    deviceAuth.tokens = tokens;
+    deviceAuth.userId = userId;
+
+    logger.info(`Device auth completed: deviceCode=${deviceCode}, userId=${userId}`);
+    return userId;
   }
 
   /**
-   * 根据 Gateway state 获取会话
+   * 检查设备授权状态
    */
-  getSessionByGatewayState(gatewayState: string): UserSession | undefined {
-    const userId = this.gatewayStateToSession.get(gatewayState);
-    if (!userId) return undefined;
-    return this.sessions.get(userId);
-  }
+  checkDeviceAuth(deviceCode: string): { authorized: boolean; userId?: string; error?: string } {
+    const deviceAuth = this.deviceAuths.get(deviceCode);
 
-  /**
-   * 根据 Client state 获取会话
-   */
-  getSessionByClientState(clientState: string): UserSession | undefined {
-    const userId = this.clientStateToSession.get(clientState);
-    if (!userId) return undefined;
-    return this.sessions.get(userId);
+    if (!deviceAuth) {
+      return { authorized: false, error: 'invalid_device_code' };
+    }
+
+    // 检查是否过期
+    const elapsed = (Date.now() - deviceAuth.createdAt.getTime()) / 1000;
+    if (elapsed > deviceAuth.expiresIn) {
+      this.deviceAuths.delete(deviceCode);
+      this.userCodeToDeviceCode.delete(deviceAuth.userCode);
+      return { authorized: false, error: 'expired_device_code' };
+    }
+
+    if (deviceAuth.tokens && deviceAuth.userId) {
+      return { authorized: true, userId: deviceAuth.userId };
+    }
+
+    return { authorized: false, error: 'authorization_pending' };
   }
 
   /**
@@ -98,20 +152,6 @@ class UserManager {
    */
   getSession(userId: string): UserSession | undefined {
     return this.sessions.get(userId);
-  }
-
-  /**
-   * 更新用户 Token
-   */
-  updateTokens(userId: string, tokens: UserTokens): void {
-    const session = this.sessions.get(userId);
-    if (session) {
-      session.tokens = tokens;
-      session.updatedAt = new Date();
-      logger.info(`Updated tokens for user: ${userId}`);
-    } else {
-      logger.warn(`User not found: ${userId}`);
-    }
   }
 
   /**
@@ -123,6 +163,18 @@ class UserManager {
   }
 
   /**
+   * 更新用户 Token
+   */
+  updateTokens(userId: string, tokens: UserTokens): void {
+    const session = this.sessions.get(userId);
+    if (session) {
+      session.tokens = tokens;
+      session.updatedAt = new Date();
+      logger.info(`Updated tokens for user: ${userId}`);
+    }
+  }
+
+  /**
    * 清除用户 Token（登出）
    */
   clearTokens(userId: string): boolean {
@@ -131,21 +183,6 @@ class UserManager {
       session.tokens = undefined;
       session.updatedAt = new Date();
       logger.info(`Cleared tokens for user: ${userId}`);
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * 删除用户会话
-   */
-  deleteSession(userId: string): boolean {
-    const session = this.sessions.get(userId);
-    if (session) {
-      this.sessions.delete(userId);
-      this.gatewayStateToSession.delete(session.gatewayState);
-      this.clientStateToSession.delete(session.clientState);
-      logger.info(`Deleted session for user: ${userId}`);
       return true;
     }
     return false;
@@ -164,12 +201,37 @@ class UserManager {
   }
 
   /**
-   * 获取默认用户 ID
+   * 生成随机码
    */
-  getDefaultUserId(): string {
-    return 'default';
+  private generateCode(length: number): string {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let code = '';
+    for (let i = 0; i < length; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return code;
+  }
+
+  /**
+   * 清理过期的设备授权
+   */
+  cleanupExpiredDeviceAuths(): void {
+    const now = Date.now();
+    for (const [deviceCode, deviceAuth] of this.deviceAuths.entries()) {
+      const elapsed = (now - deviceAuth.createdAt.getTime()) / 1000;
+      if (elapsed > deviceAuth.expiresIn) {
+        this.deviceAuths.delete(deviceCode);
+        this.userCodeToDeviceCode.delete(deviceAuth.userCode);
+        logger.info(`Cleaned up expired device auth: ${deviceCode}`);
+      }
+    }
   }
 }
 
 // 单例实例
 export const userManager = new UserManager();
+
+// 定期清理过期授权
+setInterval(() => {
+  userManager.cleanupExpiredDeviceAuths();
+}, 60000); // 每分钟清理一次

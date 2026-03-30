@@ -22,19 +22,19 @@ export function createApp(): Express {
     next();
   });
 
-  // OAuth 元数据发现端点 - 必须在根路径
-  // Claude Code 会访问 /.well-known/oauth-authorization-server
+  // OAuth 元数据发现端点
   app.get('/.well-known/oauth-authorization-server', (req: Request, res: Response) => {
     const config = getConfig();
     const baseUrl = getGatewayBaseUrlFromRequest(req);
 
     res.json({
       issuer: baseUrl,
-      authorization_endpoint: `${baseUrl}/oauth/authorize`,
+      authorization_endpoint: `${baseUrl}/oauth/device/auth`,
       token_endpoint: `${baseUrl}/oauth/token`,
+      device_authorization_endpoint: `${baseUrl}/oauth/device/auth`,
       response_types_supported: ['code'],
       code_challenge_methods_supported: ['S256'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
+      grant_types_supported: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:device_code'],
       scopes_supported: [config.oauth.scope],
     });
   });
@@ -48,7 +48,7 @@ export function createApp(): Express {
     });
   });
 
-  // OAuth 路由 (用于用户通过浏览器完成认证)
+  // OAuth 路由
   app.use('/oauth', oauthRoutes);
 
   // MCP 代理路由
@@ -84,22 +84,24 @@ export function createApp(): Express {
 
   // 根路由
   app.get('/', (_req: Request, res: Response) => {
-    const defaultUserId = userManager.getDefaultUserId();
-    const isAuthenticated = userManager.isAuthenticated(defaultUserId);
+    const baseUrl = getGatewayBaseUrlFromRequest(_req);
 
     res.json({
       name: 'MCP Gateway',
       version: process.env.npm_package_version || '1.0.0',
-      description: 'MCP Gateway for Alibaba Cloud OpenAPI MCP Server',
-      authenticated: isAuthenticated,
-      authenticateUrl: isAuthenticated ? null : '/oauth/authorize',
+      description: 'MCP Gateway for Alibaba Cloud OpenAPI MCP Server (Multi-User Device Auth)',
+      authentication: {
+        type: 'device',
+        device_authorization_endpoint: `${baseUrl}/oauth/device/auth`,
+        verification_uri: `${baseUrl}/oauth/verify`,
+      },
       endpoints: {
         mcp: '/:service/mcp',
         oauth: {
-          authorize: '/oauth/authorize',
-          callback: '/oauth/callback',
+          deviceAuth: '/oauth/device/auth',
+          verify: '/oauth/verify',
+          token: '/oauth/token',
           status: '/oauth/status',
-          logout: '/oauth/logout',
         },
         admin: {
           services: '/config/services',
